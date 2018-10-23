@@ -94,7 +94,7 @@ class TransformerEncoder(nn.Module):
         return LatentState(
             input_len=src_lengths,
             dec_input={
-                'encoder_out': x,  # T x B x C
+                'encoder_out': x,  # T x B x C  ??? are these respectively words (or something like that), batch size and latent dimension?
                 'encoder_padding_mask': encoder_padding_mask,  # B x T
             },
             dis_input=x,

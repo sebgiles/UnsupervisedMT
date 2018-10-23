@@ -18,6 +18,7 @@ from .utils import get_optimizer, parse_lambda_config, update_lambdas
 from .model import build_mt_model
 from .multiprocessing_event_loop import MultiprocessingEventLoop
 from .test import test_sharing
+from .normale import re_max       # changed it
 
 
 logger = getLogger()
@@ -642,23 +643,24 @@ class TrainerMT(MultiprocessingEventLoop):
 
         return (rank, results)
 
-    def otf_bt(self, batch, lambda_xe, backprop_temperature):
+    def otf_bt(self, batch):            # changed it: deleted lambda_xe, backprop_temperature
         """
         On the fly back-translation.
         """
         params = self.params
         lang1, sent1, len1 = batch['lang1'], batch['sent1'], batch['len1']
         lang2, sent2, len2 = batch['lang2'], batch['sent2'], batch['len2']
-        lang3, sent3, len3 = batch['lang3'], batch['sent3'], batch['len3']
-        if lambda_xe == 0:
-            logger.warning("Unused generated CPU batch for direction %s-%s-%s!" % (lang1, lang2, lang3))
-            return
+        lang3, sent3, len3 = batch['lang3'], batch['sent3'], batch['len3']      # actually no need for the third one
+
+        # if lambda_xe == 0:
+            # logger.warning("Unused generated CPU batch for direction %s-%s-%s!" % (lang1, lang2, lang3))
+            # return
         lang1_id = params.lang2id[lang1]
         lang2_id = params.lang2id[lang2]
         lang3_id = params.lang2id[lang3]
-        direction = (lang1, lang2, lang3)
+        # direction = (lang1, lang2, lang3)
         assert direction in params.pivo_directions
-        loss_fn = self.decoder.loss_fn[lang3_id]
+        # loss_fn = self.decoder.loss_fn[lang3_id]
         n_words2 = params.n_words[lang2_id]
         n_words3 = params.n_words[lang3_id]
         self.encoder.train()
@@ -668,28 +670,43 @@ class TrainerMT(MultiprocessingEventLoop):
         sent1, sent2, sent3 = sent1.cuda(), sent2.cuda(), sent3.cuda()
         bs = sent1.size(1)
 
-        if backprop_temperature == -1:
-            # lang2 -> lang3
-            encoded = self.encoder(sent2, len2, lang_id=lang2_id)
-        else:
-            # lang1 -> lang2
-            encoded = self.encoder(sent1, len1, lang_id=lang1_id)
-            scores = self.decoder(encoded, sent2[:-1], lang_id=lang2_id)
-            assert scores.size() == (len2.max() - 1, bs, n_words2)
+        with torch.no_grad():                                                   # changed it
+                encoded_1 = self.encoder(sent1, len1, lang_id=lang1_id)
+
+        #if backprop_temperature == -1:
+        scores = self.decoder(encoded_1, sent2[:-1], lang_id=lang2_id)          # changed it
+        scores = normale.re_max(scores, -1)   # to do: define the function, check it works and it's fast (I don't like softmax, I think it's not good for gradient descent)
+        bos = torch.cuda.FloatTensor(1, bs, n_words2).zero_()
+        bos[0, :, params.bos_index[lang2_id]] = 1
+        sent2_input = torch.cat([bos, scores], 0)
+        encoded_2 = self.encoder(sent2_input, len2, lang_id=lang2_id)           # am I doing backprop even on the embedding part when doing this?
+        # else:
+            # lang1 -> lang2                                                    # changed it
+            # scores = self.decoder(encoded_1, sent2[:-1], lang_id=lang2_id)
+            # assert scores.size() == (len2.max() - 1, bs, n_words2)
 
             # lang2 -> lang3
-            bos = torch.cuda.FloatTensor(1, bs, n_words2).zero_()
-            bos[0, :, params.bos_index[lang2_id]] = 1
-            sent2_input = torch.cat([bos, F.softmax(scores / backprop_temperature, -1)], 0)
-            encoded = self.encoder(sent2_input, len2, lang_id=lang2_id)
+            # bos = torch.cuda.FloatTensor(1, bs, n_words2).zero_()
+            # bos[0, :, params.bos_index[lang2_id]] = 1
+            # sent2_input = torch.cat([bos, F.softmax(scores / backprop_temperature, -1)], 0)     # I think the reason why using this part is not useful in experiments is this softmax
+            # encoded_2 = self.encoder(sent2_input, len2, lang_id=lang2_id)
 
         # cross-entropy scores / loss
-        scores = self.decoder(encoded, sent3[:-1], lang_id=lang3_id)
-        xe_loss = loss_fn(scores.view(-1, n_words3), sent3[1:].view(-1))
-        self.stats['xe_costs_%s_%s_%s' % direction].append(xe_loss.item())
-        assert lambda_xe > 0
-        loss = lambda_xe * xe_loss
-
+        # scores = self.decoder(encoded, sent3[:-1], lang_id=lang3_id)
+        # xe_loss = loss_fn(scores.view(-1, n_words3), sent3[1:].view(-1))
+        # self.stats['xe_costs_%s_%s_%s' % direction].append(xe_loss.item())
+        # assert lambda_xe > 0
+        # loss = lambda_xe * xe_loss
+        encoded_1 = encoded_1.dec_input['encoder_out']           # changed it
+        encoded_2 = encoded_2.dec_input['encoder_out']  # are these two tensors going to have the same shape? is one dimension determined by the longest sentence in the batch?
+        assert encoded_1.size(2) == 512
+        assert encoded_1.size(0) == 320
+        loss = torch.norm(encoded_1 - encoded_2, 2, 2) # am I doing this along the dimension of the latent space if I choose 2?
+        loss = torch.sum(loss,(0,1))
+        shuffled_2 = torch.index_select(encoded_2, 0, torch.randperm(encoded_2.size(0)))       # am I shuffling along the right dimension (batch size)?
+        dist_sample = torch.norm(encoded_1 - shuffled_2, 2, 2)
+        dist_sample = torch.sum(dist_sample,(0,1))
+        loss = loss / dist_sample
         # check NaN
         if (loss != loss).data.any():
             logger.error("NaN detected")
@@ -698,10 +715,10 @@ class TrainerMT(MultiprocessingEventLoop):
         # optimizer
         assert params.otf_update_enc or params.otf_update_dec
         to_update = []
-        if params.otf_update_enc:
-            to_update.append('enc')
-        if params.otf_update_dec:
-            to_update.append('dec')
+        # if params.otf_update_enc:
+        to_update.append('enc')
+        # if params.otf_update_dec:
+        to_update.append('dec')
         self.zero_grad(to_update)
         loss.backward()
         self.update_params(to_update)
@@ -709,6 +726,8 @@ class TrainerMT(MultiprocessingEventLoop):
         # number of processed sentences / words
         self.stats['processed_s'] += len3.size(0)
         self.stats['processed_w'] += len3.sum()
+
+        print("it seems the code I wrote is running")
 
     def iter(self):
         """

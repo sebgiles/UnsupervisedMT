@@ -15,7 +15,6 @@ from src.model import check_mt_model_params, build_mt_model
 from src.trainer import TrainerMT
 from src.evaluator import EvaluatorMT
 
-
 # parse parameters
 parser = argparse.ArgumentParser(description='Language transfer')
 parser.add_argument("--exp_name", type=str, default="",
@@ -169,7 +168,7 @@ parser.add_argument("--lm_share_emb", type=bool_flag, default=False,
 parser.add_argument("--lm_share_proj", type=bool_flag, default=False,
                     help="Share language model projection layers")
 # training parameters
-parser.add_argument("--batch_size", type=int, default=32,
+parser.add_argument("--batch_size", type=int, default=320, # changed it, instead of 32
                     help="Batch size")
 parser.add_argument("--group_by_size", type=bool_flag, default=True,
                     help="Sort sentences by size during the training")
@@ -228,6 +227,7 @@ parser.add_argument("--length_penalty", type=float, default=1.0,
                     help="Length penalty: <1.0 favors shorter, >1.0 favors longer sentences")
 params = parser.parse_args()
 
+# I have to use 512 as latent dimension, there is on assertion imposing it
 
 if __name__ == '__main__':
 
@@ -318,18 +318,17 @@ if __name__ == '__main__':
                 trainer.gen_time += time.time() - before_gen
 
                 # training
-                for batch in batches:
-                    lang1, lang2, lang3 = batch['lang1'], batch['lang2'], batch['lang3']
+                for batch in batches: # reminder: choose big batch size (like 320) to have a good distance sample
+                    # lang1, lang2, lang3 = batch['lang1'], batch['lang2'], batch['lang3']
                     # 2-lang back-translation - autoencoding
-                    if lang1 != lang2 == lang3:
-                        trainer.otf_bt(batch, params.lambda_xe_otfa, params.otf_backprop_temperature)
+                    # if lang1 != lang2 == lang3:
+                    trainer.otf_bt(batch) # changed it: deleted params.lambda_xe_otfa, params.otf_backprop_temperature
                     # 2-lang back-translation - parallel data
-                    elif lang1 == lang3 != lang2:
-                        trainer.otf_bt(batch, params.lambda_xe_otfd, params.otf_backprop_temperature)
+                    # elif lang1 == lang3 != lang2:
+                        # trainer.otf_bt(batch) # same, but here there was lambda_xe_otfd
                     # 3-lang back-translation - parallel data
-                    elif lang1 != lang2 and lang2 != lang3 and lang1 != lang3:
-                        trainer.otf_bt(batch, params.lambda_xe_otfd, params.otf_backprop_temperature)
-
+                    # elif lang1 != lang2 and lang2 != lang3 and lang1 != lang3:
+                        # trainer.otf_bt(batch) # same
             trainer.iter()
 
         # end of epoch

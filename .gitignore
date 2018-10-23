@@ -1,3 +1,6 @@
+#ignore manually cached data
+NMT/data
+
 # Created by https://www.gitignore.io/api/vim,python
 
 ### Python ###
